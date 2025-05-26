@@ -1,0 +1,12 @@
+# Requirements for building OpenSuperWhisper installer
+
+# Core requirements from main requirements.txt
+-r requirements.txt
+
+# Build tools
+pyinstaller>=6.0.0
+pillow>=10.0.0  # For icon generation
+
+# Windows-specific build requirements
+pywin32-ctypes>=0.2.0
+pefile>=2023.2.7

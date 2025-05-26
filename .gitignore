@@ -1,0 +1,26 @@
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info
+.pytest_cache
+.ipynb_checkpoints
+
+thumbs.db
+.DS_Store
+.idea
+
+# Build directories
+build/
+dist/
+installer_output/
+
+# Virtual environment
+opensuperwhisper_env/
+
+# Database files
+*.db
+
+# Temporary files
+*.tmp
+*.temp
+
