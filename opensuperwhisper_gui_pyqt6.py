@@ -40,28 +40,28 @@ except ImportError:
 
 class RecordButton(QPushButton):
     """Custom record button with red dot or white square"""
-    
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.is_recording = False
         self.setText("")  # No text
-        
+
     def set_recording(self, recording):
         self.is_recording = recording
         self.update()
-        
+
     def paintEvent(self, event):
         """Custom paint event to draw the button"""
         try:
             painter = QPainter(self)
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-            
+
             # Draw the button background (handled by stylesheet)
             super().paintEvent(event)
-            
+
             # Draw the icon
             center = self.rect().center()
-            
+
             if self.is_recording:
                 # Draw white square for stop
                 painter.setBrush(QBrush(QColor("#ffffff")))
@@ -80,7 +80,7 @@ class RecordButton(QPushButton):
                 painter.setPen(QPen(Qt.PenStyle.NoPen))
                 radius = 8
                 painter.drawEllipse(center, radius, radius)
-            
+
             painter.end()
         except Exception as e:
             print(f"Error in RecordButton paintEvent: {e}")
@@ -204,7 +204,7 @@ class TranscriptionItem(QFrame):
             letter-spacing: 0.3px;
         """)
         header_layout.addWidget(timestamp_label)
-        
+
         # Add copy button (subtle)
         copy_btn = QPushButton("Copy")
         copy_btn.setStyleSheet("""
@@ -250,7 +250,7 @@ class TranscriptionItem(QFrame):
 
         layout.addWidget(self.text_label)
         layout.addStretch()  # Push content to top
-        
+
     def copy_transcription(self):
         """Copy the full transcription text to clipboard"""
         try:
@@ -272,10 +272,10 @@ class OpenSuperWhisperGUI(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        
+
         try:
             print("Initializing OpenSuperWhisperGUI...")
-            
+
             # Initialize services
             self.settings_manager = get_config_manager()
             self.settings = self.settings_manager.get_all_settings()
@@ -302,7 +302,7 @@ class OpenSuperWhisperGUI(QMainWindow):
             self.is_transcribing = False
 
             print("Services initialized, setting up UI...")
-            
+
             # Setup UI
             self.setup_ui()
             self.setup_system_tray()
@@ -311,9 +311,12 @@ class OpenSuperWhisperGUI(QMainWindow):
 
             # Setup hotkeys
             self.setup_hotkeys()
-            
+
+            # Connect transcription service callbacks for better progress feedback
+            self.setup_transcription_callbacks()
+
             print("GUI initialization complete")
-            
+
         except Exception as e:
             print(f"Error in GUI initialization: {e}")
             import traceback
@@ -649,13 +652,13 @@ class OpenSuperWhisperGUI(QMainWindow):
         # Status and hotkey info layout
         status_layout = QVBoxLayout()
         status_layout.setSpacing(4)
-        
+
         # Status label (aligned with button center)
         self.status_label = QLabel("Ready to record")
         self.status_label.setObjectName("statusLabel")
         self.status_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         status_layout.addWidget(self.status_label)
-        
+
         # Hotkey hint
         self.hotkey_label = QLabel("Press Ctrl+Shift+R to start recording")
         self.hotkey_label.setStyleSheet("""
@@ -664,9 +667,9 @@ class OpenSuperWhisperGUI(QMainWindow):
             font-weight: 400;
         """)
         status_layout.addWidget(self.hotkey_label)
-        
+
         controls_layout.addLayout(status_layout)
-        
+
         # Add stretch to push clear button to right
         controls_layout.addStretch()
 
@@ -800,14 +803,16 @@ class OpenSuperWhisperGUI(QMainWindow):
 
             # Model is ready only if it's loaded, not loading, and not currently transcribing
             previous_ready_state = self.model_ready
+            previous_loading_state = self.is_model_loading
             self.is_model_loading = is_loading
             self.model_ready = model_available and not is_loading and not is_transcribing
 
             # Log state changes for debugging
-            if previous_ready_state != self.model_ready:
-                print(f"Model ready state changed: {previous_ready_state} -> {self.model_ready}")
+            if previous_ready_state != self.model_ready or previous_loading_state != self.is_model_loading:
+                print(f"Model state changed:")
+                print(f"  Ready: {previous_ready_state} -> {self.model_ready}")
+                print(f"  Loading: {previous_loading_state} -> {self.is_model_loading}")
                 print(f"  Model available: {model_available}")
-                print(f"  Is loading: {is_loading}")
                 print(f"  Is transcribing: {is_transcribing}")
 
             # Update UI based on model state
@@ -823,8 +828,11 @@ class OpenSuperWhisperGUI(QMainWindow):
         """Update UI elements based on model loading state"""
         try:
             if self.is_model_loading:
-                # Model is loading - disable transcription features
-                self.status_label.setText("Loading model...")
+                # Model is loading/downloading - disable transcription features
+                # Check if this is initial load or model change
+                current_status = self.status_label.text()
+                if "Downloading" not in current_status:
+                    self.status_label.setText("Loading model...")
                 self.record_button.setEnabled(False)
                 # Update tray tooltip
                 if hasattr(self, 'tray_icon'):
@@ -844,7 +852,7 @@ class OpenSuperWhisperGUI(QMainWindow):
                     # Update tray tooltip
                     if hasattr(self, 'tray_icon'):
                         self.tray_icon.setToolTip("OpenSuperWhisper - Ready to record")
-                # Disable recording button if transcribing
+                # Enable recording button if not transcribing
                 self.record_button.setEnabled(not self.is_transcribing)
                 # Enable file transcription menu item
                 for action in self.menuBar().actions():
@@ -896,6 +904,76 @@ class OpenSuperWhisperGUI(QMainWindow):
 
         except Exception as e:
             print(f"Failed to setup hotkeys: {e}")
+
+    def setup_transcription_callbacks(self):
+        """Setup callbacks for transcription service to provide better UI feedback"""
+        try:
+            # Connect model loading callbacks
+            self.transcription_service.on_model_loading = self.on_model_loading_started
+            self.transcription_service.on_model_loaded = self.on_model_loading_finished
+            self.transcription_service.on_download_progress = self.on_download_progress
+
+            print("Transcription service callbacks connected")
+        except Exception as e:
+            print(f"Failed to setup transcription callbacks: {e}")
+
+    def on_model_loading_started(self, message):
+        """Handle model loading started"""
+        try:
+            # Use QTimer to safely update UI on main thread
+            QTimer.singleShot(0, lambda: self._update_model_loading_ui(message, True))
+        except Exception as e:
+            print(f"Error handling model loading started: {e}")
+
+    def on_model_loading_finished(self):
+        """Handle model loading finished"""
+        try:
+            # Use QTimer to safely update UI on main thread
+            QTimer.singleShot(0, lambda: self._update_model_loading_ui("Model loaded successfully", False))
+        except Exception as e:
+            print(f"Error handling model loading finished: {e}")
+
+    def on_download_progress(self, downloaded, total):
+        """Handle download progress updates"""
+        try:
+            # Calculate progress
+            percentage = int((downloaded / total) * 100) if total > 0 else 0
+            downloaded_mb = downloaded / (1024 * 1024)
+            total_mb = total / (1024 * 1024)
+            message = f"Downloading model... {percentage}% ({downloaded_mb:.1f}/{total_mb:.1f} MB)"
+
+            # Use QTimer to safely update UI on main thread
+            QTimer.singleShot(0, lambda msg=message, pct=percentage: self._update_download_progress_ui(msg, pct))
+        except Exception as e:
+            print(f"Error handling download progress: {e}")
+
+    def _update_download_progress_ui(self, message, percentage):
+        """Update UI for download progress - runs on main thread"""
+        try:
+            self.status_label.setText(message)
+            # Update tray tooltip
+            if hasattr(self, 'tray_icon'):
+                self.tray_icon.setToolTip(f"OpenSuperWhisper - {message}")
+        except Exception as e:
+            print(f"Error updating download progress UI: {e}")
+
+    def _update_model_loading_ui(self, message, is_loading):
+        """Update UI for model loading state - runs on main thread"""
+        try:
+            if is_loading:
+                self.status_label.setText("Downloading/Loading model...")
+                self.record_button.setEnabled(False)
+                # Update tray tooltip
+                if hasattr(self, 'tray_icon'):
+                    self.tray_icon.setToolTip("OpenSuperWhisper - Loading model...")
+                print(f"Model loading UI updated: {message}")
+            else:
+                # Model loading finished - let the normal model readiness check handle the UI
+                print(f"Model loading finished: {message}")
+                # Force a model readiness check
+                QTimer.singleShot(100, self.check_model_readiness)
+        except Exception as e:
+            print(f"Error updating model loading UI: {e}")
 
     def load_recordings(self):
         """Load recordings from database"""
@@ -1044,7 +1122,7 @@ class OpenSuperWhisperGUI(QMainWindow):
             else:
                 self.record_button.setText("■")
                 self.record_button.setObjectName("stopButton")
-                
+
             # Show recording status with red dot like original
             self.status_label.setText("🔴 Recording")
             self.status_label.setStyleSheet("""
@@ -1068,7 +1146,7 @@ class OpenSuperWhisperGUI(QMainWindow):
             else:
                 self.record_button.setText("●")
                 self.record_button.setObjectName("recordButton")
-                
+
             if self.model_ready:
                 self.status_label.setText("Ready to record")
                 self.status_label.setStyleSheet("""
@@ -1090,7 +1168,7 @@ class OpenSuperWhisperGUI(QMainWindow):
         self.record_button.setStyleSheet("")
         self.record_button.style().unpolish(self.record_button)
         self.record_button.style().polish(self.record_button)
-        
+
     def start_recording_animation(self):
         """Start pulsing animation for recording button"""
         if not hasattr(self, 'recording_timer'):
@@ -1098,12 +1176,12 @@ class OpenSuperWhisperGUI(QMainWindow):
             self.recording_timer.timeout.connect(self.pulse_recording_button)
             self.pulse_state = 0
         self.recording_timer.start(600)  # Pulse every 600ms
-        
+
     def stop_recording_animation(self):
         """Stop pulsing animation"""
         if hasattr(self, 'recording_timer'):
             self.recording_timer.stop()
-            
+
     def pulse_recording_button(self):
         """Create pulsing effect for recording button"""
         self.pulse_state = (self.pulse_state + 1) % 2
@@ -1272,21 +1350,21 @@ class OpenSuperWhisperGUI(QMainWindow):
         """Show preferences dialog"""
         try:
             from preferences_dialog import PreferencesDialog
-            
+
             print(f"Current settings before dialog: {self.settings}")
 
             dialog = PreferencesDialog(self)
-            
+
             # Connect with debug
             def debug_settings_changed(new_settings):
                 print(f"Settings changed signal received with: {new_settings}")
                 self.on_settings_changed(new_settings)
-                
+
             dialog.settings_changed.connect(debug_settings_changed)
 
             result = dialog.exec()
             print(f"Dialog result: {result}, Accepted={QDialog.DialogCode.Accepted}")
-            
+
             if result == QDialog.DialogCode.Accepted:
                 print("Settings dialog accepted")
 
@@ -1297,10 +1375,10 @@ class OpenSuperWhisperGUI(QMainWindow):
         """Handle settings changes"""
         try:
             print(f"Settings changed received: {new_settings}")
-            
+
             # Store old settings for comparison
             old_settings = self.settings.copy()
-            
+
             # Update internal settings
             self.settings = new_settings
 
@@ -1322,7 +1400,7 @@ class OpenSuperWhisperGUI(QMainWindow):
 
             model_changed = current_model != new_model
             device_changed = current_device != new_device
-            
+
             print(f"Settings comparison:")
             print(f"  Model: {current_model} -> {new_model} (changed: {model_changed})")
             print(f"  Device: {current_device} -> {new_device} (changed: {device_changed})")
@@ -1666,7 +1744,7 @@ def main():
     """Main application entry point"""
     try:
         print("Starting OpenSuperWhisper PyQt6...")
-        
+
         # Set global exception handler
         sys.excepthook = handle_exception
 
@@ -1692,14 +1770,14 @@ def main():
         print(f"Failed to start application: {e}")
         import traceback
         traceback.print_exc()
-        
+
         # Try to show error dialog if possible
         try:
             if 'app' in locals():
                 QMessageBox.critical(None, "Startup Error", f"Failed to start OpenSuperWhisper:\n\n{e}")
         except:
             pass
-            
+
         sys.exit(1)
 
 

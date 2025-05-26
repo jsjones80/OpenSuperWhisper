@@ -292,16 +292,26 @@ class PreferencesDialog(QDialog):
 
         # Recording hotkey
         self.record_hotkey_edit = QLineEdit()
+        self.record_hotkey_edit.setMinimumWidth(200)
+        self.record_hotkey_edit.setPlaceholderText("e.g., Ctrl+Shift+R")
         hotkey_layout.addRow("Recording Hotkey:", self.record_hotkey_edit)
 
         # Window hotkey
         self.window_hotkey_edit = QLineEdit()
+        self.window_hotkey_edit.setMinimumWidth(200)
+        self.window_hotkey_edit.setPlaceholderText("e.g., Ctrl+Shift+W")
         hotkey_layout.addRow("Show Window Hotkey:", self.window_hotkey_edit)
+
+        # Add help text
+        help_label = QLabel("Use combinations like Ctrl+Shift+R, Alt+F1, etc.")
+        help_label.setStyleSheet("color: #888888; font-size: 11px; margin-top: 10px;")
+        hotkey_layout.addRow("", help_label)
 
         layout.addWidget(hotkey_group)
         layout.addStretch()
 
         self.tab_widget.addTab(tab, "Hotkeys")
+        print("Hotkeys tab created successfully")
 
     def create_buttons(self, layout):
         """Create dialog buttons"""
@@ -425,8 +435,15 @@ class PreferencesDialog(QDialog):
             self.auto_cleanup_check.setChecked(self.current_settings.get('auto_cleanup', True))
 
             # Hotkey settings
-            self.record_hotkey_edit.setText(self.current_settings.get('record_hotkey', 'Ctrl+Shift+R'))
-            self.window_hotkey_edit.setText(self.current_settings.get('window_hotkey', 'Ctrl+Shift+W'))
+            record_hotkey = self.current_settings.get('record_hotkey', 'Ctrl+Shift+R')
+            window_hotkey = self.current_settings.get('window_hotkey', 'Ctrl+Shift+W')
+
+            print(f"Loading hotkey settings: record='{record_hotkey}', window='{window_hotkey}'")
+
+            self.record_hotkey_edit.setText(record_hotkey)
+            self.window_hotkey_edit.setText(window_hotkey)
+
+            print(f"Hotkey fields populated: record='{self.record_hotkey_edit.text()}', window='{self.window_hotkey_edit.text()}'")
 
         except Exception as e:
             print(f"Failed to load settings: {e}")
@@ -488,19 +505,19 @@ class PreferencesDialog(QDialog):
         """Accept and save settings"""
         try:
             new_settings = self.get_settings()
-            
+
             # Handle autostart setting
             if sys.platform == "win32":
                 try:
                     from whisper.windows_utils import set_autostart, is_autostart_enabled
                     current_autostart = is_autostart_enabled()
                     new_autostart = new_settings.get('autostart', False)
-                    
+
                     if current_autostart != new_autostart:
                         if set_autostart(new_autostart):
                             print(f"Autostart {'enabled' if new_autostart else 'disabled'}")
                         else:
-                            QMessageBox.warning(self, "Autostart", 
+                            QMessageBox.warning(self, "Autostart",
                                               f"Failed to {'enable' if new_autostart else 'disable'} autostart")
                 except Exception as e:
                     print(f"Failed to handle autostart setting: {e}")

@@ -21,7 +21,7 @@ class TranscriptionService:
     def __init__(self):
         self.model = None
         self.model_name = "base"
-        
+
         # Try to get device from settings first
         try:
             from .config_manager import get_config_manager
@@ -37,7 +37,7 @@ class TranscriptionService:
         except:
             self.device = self._detect_device()
             print(f"Using auto-detected device: {self.device}")
-            
+
         self.is_loading = False
         self.is_transcribing = False
         self.progress = 0.0
@@ -50,6 +50,9 @@ class TranscriptionService:
         self.on_segment: Optional[Callable[[str], None]] = None
         self.on_complete: Optional[Callable[[str], None]] = None
         self.on_error: Optional[Callable[[Exception], None]] = None
+        self.on_model_loading: Optional[Callable[[str], None]] = None  # New callback for model loading status
+        self.on_model_loaded: Optional[Callable[[], None]] = None  # New callback for model loaded
+        self.on_download_progress: Optional[Callable[[int, int], None]] = None  # New callback for download progress (current, total)
 
         # Load default model
         self._load_model_async()
@@ -63,7 +66,7 @@ class TranscriptionService:
                 gpu_memory = torch.cuda.get_device_properties(0).total_memory
                 gpu_memory_gb = gpu_memory / (1024**3)
                 print(f"GPU detected with {gpu_memory_gb:.1f}GB memory")
-                
+
                 # Use CUDA only if we have enough memory (at least 2GB for base model)
                 if gpu_memory_gb >= 2.0:
                     return "cuda"
@@ -82,18 +85,28 @@ class TranscriptionService:
         def load_model_thread():
             try:
                 self.is_loading = True
-                print(f"Loading Whisper model '{self.model_name}' on device '{self.device}'...")
+                loading_message = f"Loading Whisper model '{self.model_name}' on device '{self.device}'..."
+                print(loading_message)
 
-                self.model = load_model(
+                # Notify UI about model loading
+                if self.on_model_loading:
+                    self.on_model_loading(loading_message)
+
+                # Use custom model loading with progress tracking
+                self.model = self._load_model_with_progress(
                     name=self.model_name,
                     device=self.device
                 )
 
                 print(f"Model loaded successfully on {self.device}")
-                
+
                 # Verify the model is actually on the correct device
                 model_info = self.get_model_info()
                 print(f"Model verification - Actual device: {model_info.get('device', 'unknown')}, Configured: {self.device}")
+
+                # Notify UI about model loaded
+                if self.on_model_loaded:
+                    self.on_model_loaded()
 
             except Exception as e:
                 print(f"Failed to load model: {e}")
@@ -104,6 +117,112 @@ class TranscriptionService:
 
         thread = threading.Thread(target=load_model_thread, daemon=True)
         thread.start()
+
+    def _load_model_with_progress(self, name: str, device: str):
+        """Load model with download progress tracking"""
+        import os
+        import urllib.request
+        import hashlib
+        import io
+        from . import _MODELS, _ALIGNMENT_HEADS
+        from .model import Whisper, ModelDimensions
+        import torch
+
+        # Check if model needs to be downloaded
+        if name in _MODELS:
+            # Set up download directory
+            default = os.path.join(os.path.expanduser("~"), ".cache")
+            download_root = os.path.join(os.getenv("XDG_CACHE_HOME", default), "whisper")
+            os.makedirs(download_root, exist_ok=True)
+
+            url = _MODELS[name]
+            expected_sha256 = url.split("/")[-2]  # Extract SHA256 from URL path
+            download_target = os.path.join(download_root, os.path.basename(url))
+
+            # Check if file already exists and is valid
+            if os.path.exists(download_target):
+                try:
+                    model_bytes = open(download_target, "rb").read()
+                    if hashlib.sha256(model_bytes).hexdigest() == expected_sha256:
+                        print(f"Model {name} already downloaded and verified")
+                        checkpoint_file = download_target
+                    else:
+                        print(f"Model {name} exists but checksum mismatch, re-downloading")
+                        checkpoint_file = self._download_with_progress(url, download_target, expected_sha256)
+                except Exception as e:
+                    print(f"Error checking existing model: {e}, re-downloading")
+                    checkpoint_file = self._download_with_progress(url, download_target, expected_sha256)
+            else:
+                print(f"Downloading model {name}...")
+                if self.on_model_loading:
+                    self.on_model_loading(f"Downloading model {name}...")
+                checkpoint_file = self._download_with_progress(url, download_target, expected_sha256)
+
+            alignment_heads = _ALIGNMENT_HEADS[name]
+        elif os.path.isfile(name):
+            checkpoint_file = name
+            alignment_heads = None
+        else:
+            from . import available_models
+            raise RuntimeError(f"Model {name} not found; available models = {available_models()}")
+
+        # Load the model
+        print(f"Loading model from {checkpoint_file}...")
+        with open(checkpoint_file, "rb") as fp:
+            checkpoint = torch.load(fp, map_location=device, weights_only=False)
+
+        dims = ModelDimensions(**checkpoint["dims"])
+        model = Whisper(dims)
+        model.load_state_dict(checkpoint["model_state_dict"])
+
+        if alignment_heads is not None:
+            model.set_alignment_heads(alignment_heads)
+
+        return model.to(device)
+
+    def _download_with_progress(self, url: str, download_target: str, expected_sha256: str):
+        """Download file with progress reporting"""
+        import urllib.request
+        import hashlib
+        import os
+
+        try:
+            with urllib.request.urlopen(url) as source:
+                total_size = int(source.info().get("Content-Length", 0))
+                downloaded = 0
+
+                with open(download_target, "wb") as output:
+                    while True:
+                        buffer = source.read(8192)
+                        if not buffer:
+                            break
+
+                        output.write(buffer)
+                        downloaded += len(buffer)
+
+                        # Report progress
+                        if self.on_download_progress and total_size > 0:
+                            self.on_download_progress(downloaded, total_size)
+
+            # Report final progress
+            if self.on_download_progress and total_size > 0:
+                print(f"Download complete: 100% ({total_size}/{total_size} bytes)")
+                self.on_download_progress(total_size, total_size)
+
+            # Verify checksum
+            model_bytes = open(download_target, "rb").read()
+            if hashlib.sha256(model_bytes).hexdigest() != expected_sha256:
+                raise RuntimeError("Model downloaded but SHA256 checksum does not match")
+
+            print(f"Model downloaded and verified successfully")
+            return download_target
+
+        except Exception as e:
+            print(f"Download failed: {e}")
+            # Clean up partial download
+            if os.path.exists(download_target):
+                os.remove(download_target)
+            raise
 
     def change_model(self, model_name: str):
         """Change the Whisper model"""
@@ -131,7 +250,7 @@ class TranscriptionService:
             return True
 
         print(f"Changing device from {self.device} to {device}")
-        
+
         # Properly cleanup existing model
         if self.model is not None:
             print(f"Unloading model from {self.device}")
@@ -141,21 +260,21 @@ class TranscriptionService:
                     self.model = self.model.to('cpu')
                 except:
                     pass
-            
+
             # Delete the model
             del self.model
             self.model = None
-            
+
             # Force garbage collection
             import gc
             gc.collect()
-            
+
             # Clear GPU cache if we were using CUDA
             if self.device.startswith('cuda') and torch.cuda.is_available():
                 torch.cuda.empty_cache()
                 torch.cuda.synchronize()
                 print("GPU memory cleared")
-        
+
         self.device = device
         self._load_model_async()
         return True
@@ -232,12 +351,12 @@ class TranscriptionService:
 
     def _transcribe_sync(self, audio_path: str, settings: Dict[str, Any]) -> Dict[str, Any]:
         """Synchronous transcription with progress tracking"""
-        
+
         # Use lock to prevent concurrent transcriptions
         with self.transcription_lock:
             self.transcription_count += 1
             print(f"Starting transcription #{self.transcription_count}")
-            
+
             # Force cleanup every 3 transcriptions to prevent memory accumulation
             if self.transcription_count % 3 == 0:
                 print("Performing periodic memory cleanup...")
@@ -262,6 +381,18 @@ class TranscriptionService:
                 if key in valid_whisper_params
             }
 
+            # Fix language setting: convert "auto" to None for automatic detection
+            if 'language' in filtered_settings:
+                if filtered_settings['language'] == 'auto' or filtered_settings['language'] == '':
+                    filtered_settings['language'] = None
+                    print("Language set to auto-detect (None)")
+                else:
+                    print(f"Language set to: {filtered_settings['language']}")
+            else:
+                # Default to auto-detect if no language specified
+                filtered_settings['language'] = None
+                print("No language specified, defaulting to auto-detect")
+
             # Update progress manually
             if self.on_progress:
                 self.on_progress(0.1)  # Starting
@@ -270,7 +401,7 @@ class TranscriptionService:
                 # Log actual device being used
                 actual_device = str(self.model.device) if hasattr(self.model, 'device') else 'unknown'
                 print(f"Transcribing on device: {actual_device} (configured: {self.device})")
-                
+
                 # Perform transcription
                 result = transcribe(
                     model=self.model,
@@ -286,22 +417,22 @@ class TranscriptionService:
             finally:
                 # More aggressive cleanup to prevent CUDA memory accumulation
                 import gc
-                
+
                 # Clear any references
                 if 'audio' in locals():
                     del audio
                 if 'mel' in locals():
                     del mel
-                    
+
                 # Force garbage collection multiple times
                 for _ in range(3):
                     gc.collect()
-                
+
                 # Clear GPU cache aggressively if using CUDA
                 if self.device.startswith('cuda') and torch.cuda.is_available():
                     torch.cuda.empty_cache()
                     torch.cuda.synchronize()  # Wait for all CUDA operations to complete
-                    
+
                     # Additional memory cleanup
                     if torch.cuda.is_available():
                         torch.cuda.reset_peak_memory_stats()
